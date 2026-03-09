@@ -1,0 +1,16 @@
+app = "noon-telegram-bot"
+primary_region = "ewr"  # Newark, NJ — closest to East Coast
+
+[build]
+
+# No HTTP service needed — this is a long-polling bot, not a web server.
+# Fly will keep the process running without exposing any ports.
+
+# Prevent Fly from stopping the machine due to "no traffic"
+[processes]
+  bot = "python -u bot.py"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
