@@ -1,6 +1,7 @@
-"""Telegram Bot auto-responder using long polling + Anthropic Claude.
+"""Telegram Bot auto-responder using long polling + Groq (Llama 3.3 70B).
 
 Runs as a persistent process. Designed for deployment on Fly.io.
+Free tier: no credit card required.
 """
 
 import os
@@ -10,7 +11,6 @@ import traceback
 import logging
 
 import httpx
-import anthropic
 
 # --- Logging ---
 logging.basicConfig(
@@ -22,15 +22,13 @@ log = logging.getLogger("telegram-bot")
 
 # --- Config ---
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 POLL_TIMEOUT = 30  # seconds for long polling
 
-# --- Anthropic client ---
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-# Model to use — change to "claude-3-haiku-20240307" for cheaper/faster responses
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+# Model — Llama 3.3 70B is the best free option on Groq
+MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # --- Per-user conversation history (in-memory) ---
 conversations: dict[int, list[dict]] = {}
@@ -70,7 +68,7 @@ def send_typing(chat_id: int) -> None:
 
 
 def get_ai_response(chat_id: int, user_message: str) -> str:
-    """Get a response from Claude with conversation history."""
+    """Get a response from Groq (Llama 3.3) with conversation history."""
     if chat_id not in conversations:
         conversations[chat_id] = []
 
@@ -79,25 +77,40 @@ def get_ai_response(chat_id: int, user_message: str) -> str:
     if len(conversations[chat_id]) > MAX_HISTORY:
         conversations[chat_id] = conversations[chat_id][-MAX_HISTORY:]
 
+    # Build messages with system prompt
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversations[chat_id]
+
     try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=conversations[chat_id],
-        )
-        assistant_text = response.content[0].text
+        with httpx.Client(timeout=60) as http:
+            resp = http.post(
+                GROQ_API,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": MODEL,
+                    "messages": messages,
+                    "max_tokens": 1024,
+                    "temperature": 0.7,
+                },
+            )
+            data = resp.json()
+
+        if "error" in data:
+            log.error("Groq API error: %s", data["error"])
+            conversations[chat_id].pop()
+            return f"Sorry, I hit an API error: {data['error'].get('message', 'Unknown error')}"
+
+        assistant_text = data["choices"][0]["message"]["content"]
         conversations[chat_id].append(
             {"role": "assistant", "content": assistant_text}
         )
         return assistant_text
-    except anthropic.APIError as e:
-        conversations[chat_id].pop()
-        log.error("Anthropic API error: %s", e)
-        return f"Sorry, I hit an API error. Please try again in a moment."
+
     except Exception as e:
         conversations[chat_id].pop()
-        log.error("Unexpected error: %s", e)
+        log.error("Error calling Groq: %s", e)
         return "Sorry, something went wrong. Please try again."
 
 
@@ -114,7 +127,7 @@ def handle_message(message: dict) -> None:
     if text == "/start":
         send_message(
             chat_id,
-            f"Hey {first_name}! I'm your AI assistant powered by Claude.\n\n"
+            f"Hey {first_name}! I'm your AI assistant powered by Llama 3.3.\n\n"
             "Send me any message and I'll respond.\n\n"
             "Commands:\n"
             "/clear - Reset conversation history\n"
